@@ -1,0 +1,11 @@
+# local Go build cache and tool temp dirs
+/.cache/
+
+# runtime artifacts of replay transactions
+/tmp/
+/replay-report.json
+/replay-report.json.tmp
+
+# editor / OS noise
+.DS_Store
+*.swp

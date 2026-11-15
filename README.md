@@ -136,23 +136,18 @@ libopencv_video430.dll
 libopencv_videoio430.dll
 ```
 
-Build the RPA tool.
+Build the RPA worker (Windows, cgo + OpenCV required).
 
 ```
-go build do.go
+go build ./cmd/do
 ```
 
-converting by use statik.
+Place `do.exe` and the OpenCV DLLs in `internal/assets/dist/` so the launcher can embed them with `go:embed` (no separate statik step).
+
+Finally, package the launcher.
 
 ```
-cd rabbitRPA
-statik -src=./ -include=*.dll,*.exe
-```
-
-Finally, package everything up.
-
-```
-go build rabbitRPA.go
+go build ./cmd/rabbitRPA
 ```
 
 ## uninstall
@@ -180,15 +175,49 @@ del or rm command. *(it's simple!)*
 -try|10|error and try counter<br>**In case of wait next screen a while, set value larger**.|
 -wait|250|loop wait Millisecond|
 -exitCode|27|recording mode to exit ascii key code<br>ascii code, [please refer this site](http://www9.plala.or.jp/sgwr-t/c_sub/ascii.html).|
--tmpDir|tmp|temporary directory name<br>save captures to this directory.<br>**If exists same directory name, it's overwriten**.|
+-tmpDir|tmp|temporary directory name<br>save captures to this directory.|
+-report|replay-report.json|replay only: JSON audit report path (empty string disables it). The report records every step with its original TSV line number.|
+-keepTmp|false|replay only: keep the per-run scratch directory for inspection instead of removing it.|
+
+# transactional replay
+
+Replay is an all-or-nothing transaction with a verifiable audit trail:
+
+ - **Strict preflight before any desktop action.** The TSV must exist and be non-empty; every line must have exactly four tab fields; device type, semicolon field counts, integer offsets/buttons and every referenced capture file are validated up front. When the platform can enumerate windows, every target window title is resolved before execution as well. All preflight errors are reported with their **1-based TSV line number**.
+ - **No silent skipping.** A missing or ambiguous target window, a failed screenshot, a missing template, a template larger than the screenshot or a match that stays below `-threshold` after all `-try` attempts is a hard failure with a non-zero process exit code. The original substring window matching and Pre→Aft fallback semantics are retained, but several equally sized matching windows now fail with an ambiguity error instead of silently picking one.
+ - **Per-step results with line numbers.** Each executed step produces a JSON record (`line`, `device`, `pre`, `aft`, `params`, `status`, `attempts`, `actionX/actionY`, timestamps, error) in `-report`. Exit codes: `0` success, `1` replay/preflight failure, `2` interrupted (Ctrl+C/SIGTERM), `3` flag usage error, `4` platform unsupported.
+ - **Resources scoped to one invocation.** Each replay creates a unique `tmp/replay-run-<timestamp>-<id>/` scratch directory for its screenshots and removes it on every exit path (success, failure, panic or interrupt). Recorded captures, the TSV and any pre-existing tmp content are never deleted; use `-keepTmp` to inspect a run's screenshots.
+ - **argv, never a shell string.** The launcher starts `do(.exe)` via `exec` with one argv element per argument — paths containing spaces or quotes cannot be re-parsed by `cmd /C` — and the child's exit code is propagated instead of being forced to zero.
+ - **No shared state between runs.** Configuration and per-run state live in an engine instance, not package globals; repeating a replay cannot read another run's temporary files.
+
+## acceptance without a real desktop
+
+Replay can be exercised fully off-Windows with a scripted adapter (no clicks, no screen access):
+
+```
+RABBITRPA_FAKE=1 RABBITRPA_FAKE_WINDOWS="Untitled - Notepad|Calculator" \
+  do -replay -import=input.tsv -report=report.json
+```
+
+`RABBITRPA_FAKE_WINDOWS` is a `|`-separated fake window list. Go tests (`go test ./...`) cover the strict TSV parser, missing/ambiguous windows, capture and template failures, threshold retries, interruption, cleanup isolation, launcher argv integrity and exit-code propagation.
+
+# build
+
+The repository now builds as normal Go packages (the old root-level two-main-file layout moved under `cmd/`):
+
+```
+go build ./cmd/do           # RPA worker (record + replay)
+go build ./cmd/rabbitRPA    # single-binary launcher
+```
+
+Native record/replay still requires Windows with cgo and OpenCV (GoCV). A `CGO_ENABLED=0` Windows build type-checks every package and returns an explicit error if desktop automation is invoked without OpenCV. The launcher embeds `do.exe`/OpenCV payloads from `internal/assets/dist/` via `go:embed` (placeholder files keep the checkout buildable; drop the real payloads there for release builds).
+
 
 # Problem
 
- - If exists same title window, doing on smaller window handle.
+ - If exists same title window, replay now fails explicitly.
 
-Because search partial of window title.<br>
-When focus some tool, this tool's window title auto changed, this tool can't focus that.<br>
-Then, search partial.<br>
+Window search still uses partial (bidirectional substring) title matching, because some tools change their window title while focused. When more than one non-zero-sized window matches, the replay transaction aborts with an ambiguity error (carrying the TSV line number) instead of silently operating on the smaller window handle. Disambiguate by using a more specific title in the TSV.
 
  - Why double click don't record?
 
